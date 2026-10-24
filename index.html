@@ -139,6 +139,172 @@
   ulang.addEventListener('click', aktifkanKamera);
 
   window.addEventListener('pagehide', matikanKamera);
+  
+/**
+ * SPPG Bridge Client — tahap pengujian.
+ * Tidak mengubah atau menerbitkan deployment produksi.
+ */
+const SPPG_BRIDGE_URL =
+  'https://script.google.com/macros/s/AKfycby5huoXBrpeGTvmNz-8mFGn3PyT7BOyQNVyppByhro/dev?page=bridge';
+
+// Isi setelah memeriksa event.origin dari Bridge di DevTools.
+// Jangan gunakan '*' atau menerima origin sembarang.
+const SPPG_BRIDGE_ORIGINS = new Set([
+  // Contoh format: 'https://script.googleusercontent.com'
+]);
+
+const SPPG_METHODS = {
+  login: 2,
+  logout: 1,
+  submitAttendance: 2,
+  adminAddVolunteer: 2,
+  adminSetActive: 3,
+  adminUsers: 1,
+  adminAttendance: 1
+};
+
+let sppgPopup = null;
+let sppgBridgeOrigin = null;
+let sppgReady = false;
+let sppgRequestCounter = 0;
+const sppgPending = new Map();
+
+function sppgConnect() {
+  if (sppgPopup && !sppgPopup.closed) {
+    sppgPopup.focus();
+    return Promise.reject(
+      new Error('Popup Bridge sudah terbuka. Tunggu koneksi atau tutup popup lalu coba lagi.')
+    );
+  }
+
+  sppgBridgeOrigin = null;
+  sppgReady = false;
+
+  // Panggil langsung dari klik pengguna agar tidak diblokir popup blocker.
+  sppgPopup = window.open(
+    SPPG_BRIDGE_URL,
+    'SPPG_ABSENSI_BRIDGE',
+    'popup,width=480,height=360'
+  );
+
+  if (!sppgPopup) {
+    return Promise.reject(
+      new Error('Popup diblokir. Izinkan popup untuk situs GitHub Pages ini.')
+    );
+  }
+
+  return new Promise((resolve, reject) => {
+    const started = Date.now();
+
+    const poll = setInterval(() => {
+      if (sppgReady) {
+        clearInterval(poll);
+        resolve(true);
+      } else if (!sppgPopup || sppgPopup.closed) {
+        clearInterval(poll);
+        reject(new Error('Popup Bridge ditutup sebelum koneksi siap.'));
+      } else if (Date.now() - started > 30000) {
+        clearInterval(poll);
+        reject(new Error(
+          'Waktu koneksi habis. Periksa URL /dev, izin akses, dan origin Bridge.'
+        ));
+      }
+    }, 250);
+  });
+}
+
+window.addEventListener('message', event => {
+  // Pesan wajib berasal dari popup yang dibuka halaman ini.
+  if (!sppgPopup || event.source !== sppgPopup) return;
+
+  // Jangan mempercayai origin yang belum ditetapkan secara eksplisit.
+  if (!SPPG_BRIDGE_ORIGINS.has(event.origin)) {
+    console.warn('Origin Bridge belum diizinkan:', event.origin);
+    return;
+  }
+
+  const msg = event.data;
+  if (!msg || msg.channel !== 'SPPG_BRIDGE_V1') return;
+
+  if (!sppgBridgeOrigin) {
+    // Kunci origin yang lolos allowlist.
+    sppgBridgeOrigin = event.origin;
+  } else if (event.origin !== sppgBridgeOrigin) {
+    return;
+  }
+
+  if (msg.type === 'READY') {
+    sppgReady = true;
+    return;
+  }
+
+  if (msg.type !== 'RESULT' || typeof msg.id !== 'string') return;
+
+  const request = sppgPending.get(msg.id);
+  if (!request) return;
+
+  sppgPending.delete(msg.id);
+  clearTimeout(request.timeout);
+
+  if (msg.ok) {
+    request.resolve(msg.result);
+  } else {
+    request.reject(new Error(msg.error || 'Permintaan Bridge gagal.'));
+  }
+});
+
+function sppgCall(fn, ...args) {
+  if (!sppgReady || !sppgPopup || sppgPopup.closed) {
+    return Promise.reject(new Error('Bridge belum tersambung.'));
+  }
+
+  if (!Object.prototype.hasOwnProperty.call(SPPG_METHODS, fn)) {
+    return Promise.reject(new Error('Fungsi backend tidak diizinkan.'));
+  }
+
+  if (args.length !== SPPG_METHODS[fn]) {
+    return Promise.reject(new Error('Jumlah parameter tidak sesuai.'));
+  }
+
+  const id = 'req_' + (++sppgRequestCounter) + '_' + Date.now();
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      sppgPending.delete(id);
+      reject(new Error('Permintaan ke server melewati batas waktu.'));
+    }, 60000);
+
+    sppgPending.set(id, { resolve, reject, timeout });
+
+    try {
+      sppgPopup.postMessage({
+        channel: 'SPPG_BRIDGE_V1',
+        type: 'CALL',
+        id,
+        fn,
+        args
+      }, sppgBridgeOrigin);
+    } catch (error) {
+      clearTimeout(timeout);
+      sppgPending.delete(id);
+      reject(error);
+    }
+  });
+}
+
+function sppgDisconnect() {
+  sppgReady = false;
+  sppgBridgeOrigin = null;
+
+  for (const [id, request] of sppgPending) {
+    clearTimeout(request.timeout);
+    request.reject(new Error('Koneksi Bridge ditutup.'));
+    sppgPending.delete(id);
+  }
+
+  if (sppgPopup && !sppgPopup.closed) sppgPopup.close();
+  sppgPopup = null;
+}
 </script>
 </body>
 </html>
